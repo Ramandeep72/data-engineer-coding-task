@@ -100,10 +100,9 @@ This document covers schema design, data quality strategy, trade-offs, and archi
 **Options considered:**
 - (A) Script-only (Python) with explicit sequence and retry logic.
 - (B) Airflow (or similar) as the primary orchestrator.
-- (C) Both: script for “run locally with one command,” plus Airflow DAG for production-like runs.
 
-**Chosen approach:** (C) – Script (`run_pipeline.py` + `orchestration/dag.py`) for simple local runs; Airflow DAG (`orchestration/airflow_dag.py`) for the same pipeline when run under Airflow.
+**Chosen approach:** (B) – Airflow only. The pipeline runs as an Airflow DAG (`orchestration/airflow_dag.py`): **ingest → validate → load_warehouse**. Tasks pass data via staged pickle files under `output/airflow_staging/<run_id>/`. For ingest + validate only (no warehouse), a standalone script `run_ingestion.py` is available.
 
-**Why:** Brief said working code is preferred and that local orchestrator setup can be complex; SQLite + script gives reviewers a zero-friction path. Airflow demonstrates the same DAG in a real orchestrator and shows how the pipeline would run in a deployed environment.
+**Why:** Airflow provides a single, production-like entry point with retries, scheduling, and observability. SQLite is the default warehouse so reviewers can run without Docker; Postgres is supported via `WAREHOUSE_URL`.
 
-**Trade-offs:** Two entry points to maintain (script and Airflow DAG); logic is shared (ingestion, validation, transformation), so behaviour stays aligned.
+**Trade-offs:** Running the full pipeline requires an Airflow environment (e.g. `airflow standalone`). Logic is shared (ingestion, validation, transformation), so behaviour is consistent.

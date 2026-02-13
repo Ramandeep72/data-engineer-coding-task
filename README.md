@@ -12,28 +12,29 @@
    ```bash
    pip install -r requirements.txt
    ```
-4. **Run the pipeline** (see [How to run your pipeline](#how-to-run-your-pipeline) below).
+4. **Run the pipeline** with Airflow (see [How to run your pipeline](#how-to-run-your-pipeline) below).
 
 No Docker required by default; the warehouse is SQLite at `output/warehouse.db`.
 
 ## Dependencies and requirements
 
-- **requirements.txt** (required for the pipeline and scripts):
+- **requirements.txt** (required for the pipeline; also used by Airflow tasks):
   - `pandas` – data frames and CSV/parsing
   - `python-dateutil` – date parsing
   - `sqlalchemy` – warehouse schema and load (SQLite or Postgres)
   - `psycopg2-binary` – only if you set `WAREHOUSE_URL` to Postgres
-- **requirements-airflow.txt** – only if you run with Airflow: install in a separate venv (`pip install -r requirements-airflow.txt`); it includes `requirements.txt` and `apache-airflow`.
+- **requirements-airflow.txt** – required to run the pipeline: install in a venv (`pip install -r requirements-airflow.txt`); it includes `requirements.txt` and `apache-airflow`.
 
 Python 3.10+ recommended. Input data must be in the `data/` folder (`google_ads_api.json`, `facebook_export.csv`, `crm_revenue.csv`).
 
 ## How to run your pipeline
 
-| Goal | Command |
-|------|--------|
-| Ingest + validate only (no DB) | `python run_ingestion.py` |
-| Full pipeline (ingest → validate → load warehouse) | `python run_pipeline.py` |
-| Same pipeline via Airflow | See [Run with Apache Airflow](#run-with-apache-airflow) below |
+The pipeline runs **with Apache Airflow** (ingest → validate → load_warehouse). See [Run the pipeline (Apache Airflow)](#run-the-pipeline-apache-airflow) below.
+
+| Goal | How |
+|------|-----|
+| **Full pipeline** | Start Airflow, trigger DAG `bluealpha_pipeline` |
+| Ingest + validate only (no DB) | `python run_ingestion.py` (optional) |
 
 Outputs: `output/validation_report.csv` and `output/warehouse.db`. To inspect them, open **output.ipynb** or query the SQLite DB directly.
 
@@ -136,12 +137,11 @@ This is a conversation, not a test. We're interested in your thinking process an
 | **ingestion/** | Loads raw data into DataFrames. See [Ingestion](#ingestion) below. |
 | **validation/** | Data-quality checks and validation report; no rows dropped. See [Validation](#validation) below. |
 | **transformation/** | Warehouse schema and load. See [Transformation](#transformation) below. |
-| **orchestration/** | DAG runner (ingest → validate → load_warehouse) with retries. See [Orchestration](#orchestration) below. |
-| **orchestration/airflow_dag.py** | Airflow DAG definition (`bluealpha_pipeline`); use this when running with Airflow. |
+| **orchestration/** | Airflow DAG (ingest → validate → load_warehouse) with retries. See [Orchestration](#orchestration) below. |
+| **orchestration/airflow_dag.py** | Airflow DAG definition (`bluealpha_pipeline`). |
 | **data/** | Input data (google_ads_api.json, facebook_export.csv, crm_revenue.csv). |
 | **eda.ipynb** | Exploratory data analysis and column-level checks on the raw sources. |
-| **run_ingestion.py** | Ingest + validate only (no database). |
-| **run_pipeline.py** | Full pipeline via orchestration (ingest → validate → load_warehouse). |
+| **run_ingestion.py** | Optional: ingest + validate only (no database). |
 
 ### Ingestion
 
@@ -182,14 +182,7 @@ Builds the analytics warehouse from validated DataFrames: schema creation and lo
 
 ### Orchestration
 
-Runs the pipeline as a DAG: **ingest → validate → load_warehouse**, with retries and idempotent behaviour.
-
-- **Script runner:** `orchestration/dag.py` — `run_dag()` runs all three steps in order in a single process, with configurable retries (`PIPELINE_MAX_RETRIES`, `PIPELINE_RETRY_BACKOFF`). Used by `run_pipeline.py`.
-- **Airflow:** The same pipeline is defined as an Airflow DAG in `orchestration/airflow_dag.py`; tasks pass data via staged files under `output/airflow_staging/<run_id>/`.
-
-Re-running is safe: validation report and warehouse are fully overwritten each run.
-
-**Public API:** `run_dag()` — see `orchestration/dag.py`.
+The pipeline runs as an **Airflow DAG**: **ingest → validate → load_warehouse**, with retries and idempotent behaviour. The DAG is defined in `orchestration/airflow_dag.py`; tasks pass data via staged files under `output/airflow_staging/<run_id>/`. Re-running is safe: validation report and warehouse are fully overwritten each run.
 
 ---
 
@@ -203,19 +196,9 @@ The pipeline is designed to run **without Docker** by default (warehouse = SQLit
 
 If you haven’t already, follow [Setup instructions](#setup-instructions) above. For **eda.ipynb** and **output.ipynb**, use the same venv and open in Jupyter or VS Code.
 
-### Run ingestion only (no database)
+### Run the pipeline (Apache Airflow)
 
-```bash
-python run_ingestion.py
-```
-
-- **Loads** all three sources (Google Ads JSON flattened, Facebook CSV, CRM CSV; CRM line-by-line so no row is dropped).
-- **Validates** without dropping any row: records every issue in `output/validation_report.csv`.
-- **Normalizes** dates to ISO where parseable, Google `cost_micros` → `spend`, CRM channel to lowercase.
-
-### Run full pipeline (orchestrated DAG)
-
-DAG (retries on failure, idempotent):
+The pipeline runs as an Airflow DAG: **ingest → validate → load_warehouse**. Data is passed between tasks via staged pickle files under `output/airflow_staging/<run_id>/`.
 
 ![Pipeline DAG](dag_diagram.png)
 
@@ -225,38 +208,16 @@ DAG (retries on failure, idempotent):
 | **validate**    | 3 DataFrames              | Same 3 DataFrames (normalized) + `output/validation_report.csv`        |
 | **load_warehouse** | 3 DataFrames           | `output/warehouse.db` (SQLite) or Postgres: dim_campaign, fact_ad_performance, fact_orders |
 
-```bash
-python run_pipeline.py
-```
-
-- **Orchestration** (`orchestration/dag.py`): DAG with tasks **ingest → validate → load_warehouse**. Each task runs after its dependencies; **retries** on failure (default 3 attempts, exponential backoff; set `PIPELINE_MAX_RETRIES`, `PIPELINE_RETRY_BACKOFF` to override). **Idempotent**: safe to re-run (report and warehouse are full-refreshed).
-- **No Docker needed by default.** Writes to **SQLite** at `output/warehouse.db`.
-- Loads into the warehouse:
-  - **dim_campaign** – campaigns from Google + Facebook
-  - **fact_ad_performance** – daily ad metrics (Google + Facebook)
-  - **fact_orders** – orders with attribution (channel_attributed, campaign_source kept for flexibility)
-
-**Use Postgres instead** (e.g. in orchestration): start Docker (`docker compose up -d postgres`), then:
-
-```bash
-export WAREHOUSE_URL="postgresql://postgres:password@localhost:5432/local"
-python run_pipeline.py
-```
-
-Duplicate `order_id`s are deduplicated at load (keep first); duplicates are still in the validation report.
-
-### Run with Apache Airflow
-
-The same pipeline is available as an Airflow DAG: **ingest → validate → load_warehouse**. Data is passed between tasks via staged pickle files under `output/airflow_staging/<run_id>/` (Airflow tasks run in separate processes).
-
-1. **Install Airflow** (separate venv recommended):
+1. **Install Airflow** (use a dedicated venv):
    ```bash
    python -m venv .venv-airflow && source .venv-airflow/bin/activate
    pip install -r requirements-airflow.txt
    ```
 
-2. **Point Airflow at this repo:** set `AIRFLOW__CORE__DAGS_FOLDER` to the repo’s **orchestration/** directory (e.g. `/path/to/data-engineer-coding-task/orchestration`). Airflow will load `airflow_dag.py` (and ignore `dag.py`, which is for the script runner). The DAG file adds the project root to `sys.path`, so `ingestion`, `validation`, and `transformation` are importable when tasks run.
+2. **Point Airflow at this repo:** set `AIRFLOW__CORE__DAGS_FOLDER` to the repo’s **orchestration/** directory (e.g. `/path/to/data-engineer-coding-task/orchestration`). Set `AIRFLOW__CORE__LOAD_EXAMPLES=False` to avoid loading example DAGs. Airflow loads `airflow_dag.py` from that folder. The DAG file adds the project root to `sys.path`, so `ingestion`, `validation`, and `transformation` are importable when tasks run.
 
-3. **Start Airflow** (e.g. `airflow standalone`), then trigger the DAG `bluealpha_pipeline` from the UI or CLI.
+3. **Start Airflow** (e.g. `airflow standalone`), then trigger the DAG **bluealpha_pipeline** from the UI (http://localhost:8080) or CLI: `airflow dags trigger bluealpha_pipeline`.
 
-The DAG uses the same SQLite default as `run_pipeline.py`; set `WAREHOUSE_URL` in the Airflow environment to use Postgres.
+**Defaults:** Writes to **SQLite** at `output/warehouse.db`. Set `WAREHOUSE_URL` in the Airflow environment to use Postgres. Duplicate `order_id`s are deduplicated at load (keep first); duplicates are still in the validation report.
+
+**Optional – ingest + validate only (no DB):** `python run_ingestion.py` loads and validates, writes `output/validation_report.csv`, no warehouse.
